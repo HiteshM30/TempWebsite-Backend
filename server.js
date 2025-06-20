@@ -15,7 +15,7 @@ const openai = new OpenAI({
 });
 
 const allowedOrigins = [
-  'https://temp-website-frontend.vercel.app', // <-- updated frontend URL
+  'https://temp-website-frontend.vercel.app',
   'http://localhost:3000',
   'http://localhost:5173'
 ];
@@ -33,13 +33,11 @@ app.use(
       }
     },
     credentials: true,
-     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
   })
 );
-app.use(express.json());
 
-// Serve static images from public/images
 app.use('/images', express.static('public/images'));
 
 const limiter = rateLimit({
@@ -162,12 +160,74 @@ function extractExcerpt(content, query, length = 300) {
   return (start > 0 ? '...' : '') + content.substring(start, end) + (end < content.length ? '...' : '');
 }
 
-// --- API ROUTES ---
-
+// Health check
 app.get('/api/health', (req, res) => {
   res.status(200).json({ status: 'OK' });
 });
 
+// Chat route
+app.post('/api/chat', async (req, res) => {
+  try {
+    if (!req.body || !req.body.message) {
+      return res.status(400).json({ error: 'Message is required.' });
+    }
+
+    const { message, conversation = [] } = req.body;
+
+    const relevantDocs = searchKnowledgeBase(message, 3);
+    let context = '';
+
+    if (relevantDocs.length > 0) {
+      context = 'Based on Eptura knowledge:\n\n';
+      relevantDocs.forEach((doc, i) => {
+        context += `${i + 1}. ${doc.title}\n${doc.excerpt}\nSource: ${doc.url}\n\n`;
+      });
+    }
+
+    const systemMessage = {
+      role: 'system',
+      content: `You are an AI assistant for Eptura Asset Management.
+
+You help users with:
+- Asset Management
+- Work Orders
+- Maintenance
+- Analytics
+- Admin and Settings
+
+${context ? `Use this:\n${context}` : ''}`
+    };
+
+    const messages = [
+      systemMessage,
+      ...conversation.slice(-10),
+      { role: 'user', content: message }
+    ];
+
+    const completion = await openai.chat.completions.create({
+      model: process.env.OPENAI_MODEL || 'gpt-3.5-turbo',
+      messages,
+      max_tokens: 1000,
+      temperature: 0.7
+    });
+
+    const response = completion.choices[0].message.content;
+
+    res.json({
+      response,
+      sources: relevantDocs.map(doc => ({
+        title: doc.title,
+        url: doc.url
+      }))
+    });
+
+  } catch (error) {
+    console.error('Error in /api/chat:', error);
+    res.status(500).json({ error: 'Internal server error', details: error.message });
+  }
+});
+
+// Image prompt route — ✅ single version
 app.post('/api/ask', (req, res) => {
   const { prompt } = req.body;
 
@@ -178,7 +238,8 @@ app.post('/api/ask', (req, res) => {
     'asset': 'sample-asset.png'
   };
 
-  let imageKey = Object.keys(imageMap).find(key => prompt && prompt.toLowerCase().includes(key));
+  const promptLower = prompt ? prompt.toLowerCase() : '';
+  const imageKey = Object.keys(imageMap).find(key => promptLower.includes(key));
   const imageUrl = imageKey ? `/images/${imageMap[imageKey]}` : null;
 
   res.json({
@@ -188,7 +249,7 @@ app.post('/api/ask', (req, res) => {
   });
 });
 
-
+// Search endpoint
 app.get('/api/search', (req, res) => {
   try {
     const { q, limit = 10 } = req.query;
@@ -202,33 +263,26 @@ app.get('/api/search', (req, res) => {
   }
 });
 
-// ✅ Support GET & POST for /api/scrape
+// Scraping trigger
 app.route('/api/scrape')
   .get(async (req, res) => {
     try {
       await scrapeEpturaKnowledge();
-      res.json({
-        message: 'Scraping complete (GET)',
-        entriesCount: knowledgeBase.size
-      });
+      res.json({ message: 'Scraping complete (GET)', entriesCount: knowledgeBase.size });
     } catch (error) {
-      console.error('❌ Scrape GET error:', error.message);
       res.status(500).json({ error: 'Scrape failed', details: error.message });
     }
   })
   .post(async (req, res) => {
     try {
       await scrapeEpturaKnowledge();
-      res.json({
-        message: 'Scraping complete (POST)',
-        entriesCount: knowledgeBase.size
-      });
+      res.json({ message: 'Scraping complete (POST)', entriesCount: knowledgeBase.size });
     } catch (error) {
-      console.error('❌ Scrape POST error:', error.message);
       res.status(500).json({ error: 'Scrape failed', details: error.message });
     }
   });
 
+// Stats endpoint
 app.get('/api/knowledge/stats', (req, res) => {
   res.json({
     totalEntries: knowledgeBase.size,
@@ -237,10 +291,12 @@ app.get('/api/knowledge/stats', (req, res) => {
   });
 });
 
+// Root
 app.get('/', (req, res) => {
   res.send('Eptura Backend is running!');
 });
 
+// Logging middleware
 app.use((req, res, next) => {
   console.log(`${req.method} ${req.url} - Origin: ${req.headers.origin}`);
   res.on('finish', () => {
@@ -249,62 +305,18 @@ app.use((req, res, next) => {
   next();
 });
 
+// 404 fallback
 app.use('*', (req, res) => {
   res.status(404).json({ error: 'Not found' });
 });
 
-app.post('/api/ask', (req, res) => {
-  const { prompt } = req.body;
-
-  // Lowercase prompt for case-insensitive matching
-  const promptLower = prompt ? prompt.toLowerCase() : '';
-
-  // Default image and alt text
-  let imageUrl = null;
-  let imageAlt = 'No image';
-
-  // Check for keywords in the prompt
-  if (
-    promptLower.includes('image') ||
-    promptLower.includes('images') ||
-    promptLower.includes('work order')
-  ) {
-    imageUrl = '/images/workflow-module.jpg'; // Make sure this file exists in public/images
-    imageAlt = 'Workflow module image';
-  }
-
-  res.json({
-    text: `Here's the architecture diagram for: ${prompt}`,
-    image: imageUrl,
-    imageAlt: imageAlt
-  });
-});
+// Global error handler
 app.use((err, req, res, next) => {
   console.error(err.message);
   res.status(500).json({ error: 'Internal server error' });
 });
 
-app.post('/api/ask', (req, res) => {
-  const { prompt } = req.body;
-
-  // Map prompt keywords to image filenames
-  const imageMap = {
-    'workflow': 'workflow-module.jpg',
-    'dashboard': 'dashboard.png',
-    'sensor': 'sensor-mapping.png',
-    'asset': 'sample-asset.png'
-  };
-
-  let imageKey = Object.keys(imageMap).find(key => prompt && prompt.toLowerCase().includes(key));
-  const imageUrl = imageKey ? `/images/${imageMap[imageKey]}` : null;
-
-  res.json({
-    text: `Here's the architecture diagram for: ${prompt}`,
-    image: imageUrl,
-    imageAlt: imageKey ? `Image for ${imageKey}` : 'No image'
-  });
-});
-
+// Init
 async function initialize() {
   console.log('🚀 Initializing...');
   if (!lastScrapeTime || (Date.now() - lastScrapeTime) > SCRAPE_INTERVAL) {
