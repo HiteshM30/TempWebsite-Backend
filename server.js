@@ -168,70 +168,26 @@ app.get('/api/health', (req, res) => {
   res.status(200).json({ status: 'OK' });
 });
 
-app.post('/api/chat', async (req, res) => {
-  try {
-    console.log('Received /api/chat request:', req.body); // Log incoming request
+app.post('/api/ask', (req, res) => {
+  const { prompt } = req.body;
 
-    if (!req.body || !req.body.message) {
-      console.error('Missing message in request body');
-      return res.status(400).json({ error: 'Message is required.' });
-    }
+  const imageMap = {
+    'workflow': 'workflow-module.jpg',
+    'dashboard': 'dashboard.png',
+    'sensor': 'sensor-mapping.png',
+    'asset': 'sample-asset.png'
+  };
 
-    const { message, conversation = [] } = req.body;
-    if (!message) return res.status(400).json({ error: 'Message is required' });
+  let imageKey = Object.keys(imageMap).find(key => prompt && prompt.toLowerCase().includes(key));
+  const imageUrl = imageKey ? `/images/${imageMap[imageKey]}` : null;
 
-    const relevantDocs = searchKnowledgeBase(message, 3);
-    let context = '';
-
-    if (relevantDocs.length > 0) {
-      context = 'Based on Eptura knowledge:\n\n';
-      relevantDocs.forEach((doc, i) => {
-        context += `${i + 1}. ${doc.title}\n${doc.excerpt}\nSource: ${doc.url}\n\n`;
-      });
-    }
-
-    const systemMessage = {
-      role: 'system',
-      content: `You are an AI assistant for Eptura Asset Management.
-
-You help users with:
-- Asset Management
-- Work Orders
-- Maintenance
-- Analytics
-- Admin and Settings
-
-${context ? `Use this:\n${context}` : ''}`
-    };
-
-    const messages = [
-      systemMessage,
-      ...conversation.slice(-10),
-      { role: 'user', content: message }
-    ];
-
-    const completion = await openai.chat.completions.create({
-      model: process.env.OPENAI_MODEL || 'gpt-3.5-turbo',
-      messages,
-      max_tokens: 1000,
-      temperature: 0.7
-    });
-
-    const response = completion.choices[0].message.content;
-
-    res.json({
-      response,
-      sources: relevantDocs.map(doc => ({
-        title: doc.title,
-        url: doc.url
-      }))
-    });
-
-  } catch (error) {
-    console.error('Error in /api/chat:', error); // This will log any error
-    res.status(500).json({ error: 'Internal server error', details: error.message });
-  }
+  res.json({
+    text: `Here's the architecture diagram for: ${prompt}`,
+    image: imageUrl,
+    imageAlt: imageKey ? `Image for ${imageKey}` : 'No image'
+  });
 });
+
 
 app.get('/api/search', (req, res) => {
   try {
