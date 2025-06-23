@@ -9,10 +9,17 @@ const helmet = require('helmet');
 require('dotenv').config();
 
 const PORT = process.env.PORT || 3001;
+const server = app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+});
 
+server.on('error', (error) => {
+  console.error('❌ Server failed to start:', error.message);
+});
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
+
 
 const allowedOrigins = [
   'https://eptura-frontend-15.vercel.app', // Add your deployed frontend URL
