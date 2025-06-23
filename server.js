@@ -1,79 +1,96 @@
 const express = require('express');
 const cors = require('cors');
-const app = express();
 const axios = require('axios');
 const cheerio = require('cheerio');
-const { OpenAI } = require('openai');
+const OpenAI = require('openai');
 const rateLimit = require('express-rate-limit');
 const helmet = require('helmet');
+const compression = require('compression');
+const morgan = require('morgan');
 require('dotenv').config();
 
+const app = express();
 const PORT = process.env.PORT || 3001;
-const server = app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-});
+const KNOWLEDGE_SECTIONS = [
+  { name: 'Condeco', url: 'https://knowledge.eptura.com/condeco' },
+  { name: 'Proxyclick', url: 'https://knowledge.eptura.com/proxyclick' },
+  { name: 'Serraview', url: 'https://knowledge.eptura.com/serraview' },
+  { name: 'iOFFICE', url: 'https://knowledge.eptura.com/ioffice' },
+  { name: 'ManagerPlus', url: 'https://knowledge.eptura.com/managerplus' },
+  { name: 'SpaceIQ', url: 'https://knowledge.eptura.com/spaceiq' },
+  { name: 'Archibus', url: 'https://knowledge.eptura.com/archibus' },
+];
+const SCRAPE_INTERVAL = 24 * 60 * 60 * 1000;
 
-server.on('error', (error) => {
-  console.error('❌ Server failed to start:', error.message);
+const knowledgeBase = new Map();
+let lastScrapeTime = null;
+
+app.use(morgan('combined')); // Added detailed logging
+app.use(helmet());
+app.use(compression());
+app.use(express.json());
+app.use(express.static('public'));
+app.use(
+  cors({
+    origin: '*', // Temporary for debugging; revert to specific origins later
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+  })
+);
+
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
 });
+app.use(limiter);
+
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
+async function scrapeSectionRecursively(section, depth, maxDepth) {
+  if (depth > maxDepth) return;
+  try {
+    const response = await axios.get(section.url, { timeout: 10000 });
+    const $ = cheerio.load(response.data);
+    const pageTitle = $('title').text() || section.name;
+    const content = $('body').text().replace(/\s+/g, ' ').trim().substring(0, 1000);
+    knowledgeBase.set(section.url, {
+      title: pageTitle,
+      content,
+      url: section.url,
+    });
 
-const allowedOrigins = [
-  'https://eptura-frontend-15.vercel.app', // Add your deployed frontend URL
-  'http://localhost:3000',
-  'http://localhost:5173'
-];
-
-app.use(express.json({ limit: '10mb' }));
-app.use(helmet());
-
-app.use(
-  cors({
-    origin: (origin, callback) => {
-      if (!origin || allowedOrigins.includes(origin)) {
-        callback(null, true);
-      } else {
-        callback(new Error('Not allowed by CORS'));
+    const links = [];
+    $('a').each((_, element) => {
+      const href = $(element).attr('href');
+      if (
+        href &&
+        href.startsWith('https://knowledge.eptura.com') &&
+        !knowledgeBase.has(href)
+      ) {
+        links.push({ name: $(element).text(), url: href });
       }
-    },
-    credentials: true,
-     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  })
-);
-app.use(express.json());
+    });
 
-// Serve static images from public/images
-app.use('/images', express.static('public/images'));
-
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 100
-});
-app.use('/api/', limiter);
-
-let knowledgeBase = new Map();
-let lastScrapeTime = null;
-const SCRAPE_INTERVAL = 24 * 60 * 60 * 1000;
-
-const EPTURA_BASE_URL = 'https://knowledge.eptura.com';
-const KNOWLEDGE_SECTIONS = [
-  '/Asset/Modules',
-  '/Asset/Product_Information',
-  '/Asset/Eptura_Asset_Modules',
-  '/ManagerPlus',
-  '/Space/Modules'
-];
+    for (const link of links) {
+      await scrapeSectionRecursively(link, depth + 1, maxDepth);
+      await new Promise(resolve => setTimeout(resolve, 2000)); // Added delay
+    }
+  } catch (error) {
+    console.error(`❌ Failed to scrape ${section.url}:`, error.message);
+  }
+}
 
 async function scrapeEpturaKnowledge() {
   console.log('🔁 Starting scraping...');
   try {
     for (const section of KNOWLEDGE_SECTIONS) {
-      await scrapeSectionRecursively(section);
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      await scrapeSectionRecursively(section, 0, 1); // Reduced maxDepth
+      await new Promise(resolve => setTimeout(resolve, 2000)); // Added delay
     }
     lastScrapeTime = new Date();
     console.log(`✅ Scraping done. Total: ${knowledgeBase.size}`);
@@ -82,273 +99,125 @@ async function scrapeEpturaKnowledge() {
   }
 }
 
-async function scrapeSectionRecursively(path, depth = 0, maxDepth = 3) {
-  if (depth > maxDepth) return;
-
-  try {
-    const url = `${EPTURA_BASE_URL}${path}`;
-    console.log(`🔍 Scraping: ${url}`);
-    const response = await axios.get(url, {
-      timeout: 10000,
-      headers: { 'User-Agent': 'Mozilla/5.0' }
-    });
-
-    const $ = cheerio.load(response.data);
-    const title = $('title').text() || $('h1').first().text() || 'Untitled';
-    const content = extractContent($);
-
-    if (content && content.length > 50) {
-      knowledgeBase.set(url, {
-        title: title.trim(),
-        content: content.trim(),
-        url,
-        lastUpdated: new Date()
-      });
-    }
-
-    const links = $('a[href*="/Asset/"], a[href*="/ManagerPlus/"], a[href*="/Space/"]')
-      .map((i, el) => $(el).attr('href'))
-      .get()
-      .filter(href => href && href.startsWith('/'))
-      .slice(0, 10);
-
-    for (const link of links) {
-      if (!knowledgeBase.has(`${EPTURA_BASE_URL}${link}`)) {
-        await scrapeSectionRecursively(link, depth + 1, maxDepth);
-        await new Promise(resolve => setTimeout(resolve, 500));
-      }
-    }
-
-  } catch (error) {
-    console.error(`❌ Error scraping ${path}:`, error.message);
-  }
+async function initialize() {
+  console.log('🚀 Initializing...');
+  // if (!lastScrapeTime || (Date.now() - lastScrapeTime) > SCRAPE_INTERVAL) {
+  //   await scrapeEpturaKnowledge(); // Disabled on startup
+  // }
+  setInterval(() => {
+    console.log('🕒 Scheduled scrape...');
+    scrapeEpturaKnowledge();
+  }, SCRAPE_INTERVAL);
 }
 
-function extractContent($) {
-  $('script, style, nav, header, footer, .sidebar').remove();
-  let content = '';
-
-  const selectors = ['.content', '.main-content', '#content', 'main', '.article-content', 'body'];
-  for (const selector of selectors) {
-    const element = $(selector);
-    if (element.length > 0) {
-      content = element.text();
-      break;
-    }
-  }
-
-  return content.replace(/\s+/g, ' ').replace(/\n+/g, '\n').trim();
-}
-
-function searchKnowledgeBase(query, limit = 5) {
-  const queryLower = query.toLowerCase();
+function searchKnowledgeBase(query, limit = 3) {
   const results = [];
-
-  for (const [url, data] of knowledgeBase.entries()) {
-    const titleScore = data.title.toLowerCase().includes(queryLower) ? 2 : 0;
-    const contentScore = data.content.toLowerCase().includes(queryLower) ? 1 : 0;
-    const score = titleScore + contentScore;
-
-    if (score > 0) {
+  const queryLower = query.toLowerCase();
+  for (const [url, doc] of knowledgeBase.entries()) {
+    if (
+      doc.title.toLowerCase().includes(queryLower) ||
+      doc.content.toLowerCase().includes(queryLower)
+    ) {
       results.push({
-        ...data,
-        score,
-        excerpt: extractExcerpt(data.content, queryLower)
+        title: doc.title,
+        excerpt: doc.content.substring(0, 200) + '...',
+        url: doc.url,
       });
     }
+    if (results.length >= limit) break;
   }
-
-  return results.sort((a, b) => b.score - a.score).slice(0, limit);
+  return results;
 }
-
-function extractExcerpt(content, query, length = 300) {
-  const index = content.toLowerCase().indexOf(query);
-  if (index === -1) return content.substring(0, length) + '...';
-  const start = Math.max(0, index - 150);
-  const end = Math.min(content.length, index + query.length + 150);
-  return (start > 0 ? '...' : '') + content.substring(start, end) + (end < content.length ? '...' : '');
-}
-
-// --- API ROUTES ---
 
 app.get('/api/health', (req, res) => {
-  res.status(200).json({ status: 'OK' });
+  res.json({ status: 'OK' });
 });
 
 app.post('/api/chat', async (req, res) => {
   try {
-    console.log('Received /api/chat request:', req.body); // Log incoming request
-
+    console.log('Received /api/chat request:', req.body);
     if (!req.body || !req.body.message) {
       console.error('Missing message in request body');
       return res.status(400).json({ error: 'Message is required.' });
     }
-
     const { message, conversation = [] } = req.body;
-    if (!message) return res.status(400).json({ error: 'Message is required' });
-
     const relevantDocs = searchKnowledgeBase(message, 3);
     let context = '';
-
     if (relevantDocs.length > 0) {
       context = 'Based on Eptura knowledge:\n\n';
       relevantDocs.forEach((doc, i) => {
         context += `${i + 1}. ${doc.title}\n${doc.excerpt}\nSource: ${doc.url}\n\n`;
       });
     }
-
     const systemMessage = {
       role: 'system',
-      content: `You are an AI assistant for Eptura Asset Management.
-
-You help users with:
-- Asset Management
-- Work Orders
-- Maintenance
-- Analytics
-- Admin and Settings
-
-${context ? `Use this:\n${context}` : ''}`
+      content: `You are an AI assistant for Eptura Asset Management.\n\n${context}`
     };
-
     const messages = [
       systemMessage,
       ...conversation.slice(-10),
       { role: 'user', content: message }
     ];
-
-    const completion = await openai.chat.completions.create({
-      model: process.env.OPENAI_MODEL || 'gpt-3.5-turbo',
-      messages,
-      max_tokens: 1000,
-      temperature: 0.7
-    });
-
-    const response = completion.choices[0].message.content;
-
-    res.json({
-      response,
-      sources: relevantDocs.map(doc => ({
-        title: doc.title,
-        url: doc.url
-      }))
-    });
-
+    try {
+      const completion = await openai.chat.completions.create({
+        model: process.env.OPENAI_MODEL || 'gpt-3.5-turbo',
+        messages,
+        max_tokens: 1000,
+        temperature: 0.7
+      });
+      const response = completion.choices[0].message.content;
+      res.json({
+        response,
+        sources: relevantDocs.map(doc => ({
+          title: doc.title,
+          url: doc.url
+        }))
+      });
+    } catch (openaiError) {
+      console.error('OpenAI API error:', openaiError.message);
+      res.status(500).json({ error: 'Failed to process request with OpenAI', details: openaiError.message });
+    }
   } catch (error) {
-    console.error('Error in /api/chat:', error); // This will log any error
+    console.error('Error in /api/chat:', error);
     res.status(500).json({ error: 'Internal server error', details: error.message });
   }
 });
 
-app.get('/api/search', (req, res) => {
-  try {
-    const { q, limit = 10 } = req.query;
-    if (!q) return res.status(400).json({ error: 'Query is required' });
-
-    const results = searchKnowledgeBase(q, parseInt(limit));
-    res.json({ results });
-  } catch (error) {
-    console.error('❌ Search error:', error.message);
-    res.status(500).json({ error: 'Search failed' });
+app.post('/api/search', (req, res) => {
+  const { query } = req.body;
+  if (!query) {
+    return res.status(400).json({ error: 'Query is required' });
   }
+  const results = searchKnowledgeBase(query, 5);
+  res.json({ results });
 });
 
-// ✅ Support GET & POST for /api/scrape
-app.route('/api/scrape')
-  .get(async (req, res) => {
-    try {
-      await scrapeEpturaKnowledge();
-      res.json({
-        message: 'Scraping complete (GET)',
-        entriesCount: knowledgeBase.size
-      });
-    } catch (error) {
-      console.error('❌ Scrape GET error:', error.message);
-      res.status(500).json({ error: 'Scrape failed', details: error.message });
-    }
-  })
-  .post(async (req, res) => {
-    try {
-      await scrapeEpturaKnowledge();
-      res.json({
-        message: 'Scraping complete (POST)',
-        entriesCount: knowledgeBase.size
-      });
-    } catch (error) {
-      console.error('❌ Scrape POST error:', error.message);
-      res.status(500).json({ error: 'Scrape failed', details: error.message });
-    }
-  });
+app.post('/api/scrape', async (req, res) => {
+  try {
+    await scrapeEpturaKnowledge();
+    res.json({ message: 'Scraping completed', total: knowledgeBase.size });
+  } catch (error) {
+    res.status(500).json({ error: 'Scraping failed', details: error.message });
+  }
+});
 
 app.get('/api/knowledge/stats', (req, res) => {
   res.json({
-    totalEntries: knowledgeBase.size,
-    lastScrapeTime,
-    needsUpdate: !lastScrapeTime || (Date.now() - lastScrapeTime.getTime()) > SCRAPE_INTERVAL
+    totalArticles: knowledgeBase.size,
+    lastScraped: lastScrapeTime ? lastScrapeTime.toISOString() : null,
   });
-});
-
-app.get('/', (req, res) => {
-  res.send('Eptura Backend is running!');
-});
-
-app.use((req, res, next) => {
-  console.log(`${req.method} ${req.url} - Origin: ${req.headers.origin}`);
-  res.on('finish', () => {
-    console.log(`Response Headers: ${JSON.stringify(res.getHeaders())}`);
-  });
-  next();
-});
-
-app.use('*', (req, res) => {
-  res.status(404).json({ error: 'Not found' });
 });
 
 app.post('/api/ask', (req, res) => {
   const { prompt } = req.body;
-
-  // Lowercase prompt for case-insensitive matching
-  const promptLower = prompt ? prompt.toLowerCase() : '';
-
-  // Default image and alt text
-  let imageUrl = null;
-  let imageAlt = 'No image';
-
-  // Check for keywords in the prompt
-  if (
-    promptLower.includes('image') ||
-    promptLower.includes('images') ||
-    promptLower.includes('work order')
-  ) {
-    imageUrl = '/images/workflow-module.jpg'; // Make sure this file exists in public/images
-    imageAlt = 'Workflow module image';
-  }
-
-  res.json({
-    text: `Here's the architecture diagram for: ${prompt}`,
-    image: imageUrl,
-    imageAlt: imageAlt
-  });
-});
-app.use((err, req, res, next) => {
-  console.error(err.message);
-  res.status(500).json({ error: 'Internal server error' });
-});
-
-app.post('/api/ask', (req, res) => {
-  const { prompt } = req.body;
-
-  // Map prompt keywords to image filenames
   const imageMap = {
     'workflow': 'workflow-module.jpg',
     'dashboard': 'dashboard.png',
     'sensor': 'sensor-mapping.png',
     'asset': 'sample-asset.png'
   };
-
   let imageKey = Object.keys(imageMap).find(key => prompt && prompt.toLowerCase().includes(key));
   const imageUrl = imageKey ? `/images/${imageMap[imageKey]}` : null;
-
   res.json({
     text: `Here's the architecture diagram for: ${prompt}`,
     image: imageUrl,
@@ -356,17 +225,7 @@ app.post('/api/ask', (req, res) => {
   });
 });
 
-async function initialize() {
-  console.log('🚀 Initializing...');
-  // if (!lastScrapeTime || (Date.now() - lastScrapeTime) > SCRAPE_INTERVAL) {
-  //   await scrapeEpturaKnowledge();
-  // }
-
-  setInterval(() => {
-    console.log('🕒 Scheduled scrape...');
-    scrapeEpturaKnowledge();
-  }, SCRAPE_INTERVAL);
-}
-initialize();
-
-module.exports = app;
+app.listen(PORT, async () => {
+  console.log(`Server running on port ${PORT}`);
+  await initialize();
+});
