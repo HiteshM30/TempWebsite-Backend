@@ -358,9 +358,9 @@ app.post('/api/ask', (req, res) => {
 
 async function initialize() {
   console.log('🚀 Initializing...');
-  if (!lastScrapeTime || (Date.now() - lastScrapeTime) > SCRAPE_INTERVAL) {
-    await scrapeEpturaKnowledge();
-  }
+  // if (!lastScrapeTime || (Date.now() - lastScrapeTime) > SCRAPE_INTERVAL) {
+  //   await scrapeEpturaKnowledge();
+  // }
 
   setInterval(() => {
     console.log('🕒 Scheduled scrape...');
